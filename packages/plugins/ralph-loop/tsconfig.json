@@ -6,5 +6,5 @@
     "noEmit": true,
     "noUncheckedIndexedAccess": false
   },
-  "include": ["index.ts", "state.ts", "state.test.ts"]
+  "include": ["index.ts", "state.ts", "state.test.ts", "plugin.test.ts"]
 }
