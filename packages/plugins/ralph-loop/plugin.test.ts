@@ -6,9 +6,12 @@ type SetupContext = Parameters<typeof plugin.setup>[0]
 function harness() {
   const store = new Map<string, unknown>()
   const commands = new Map<string, { execute: (input: unknown) => Promise<void> }>()
-  const synthetic: Array<{ text?: string; description?: string }> = []
+  const children: Array<{ id: string; title?: string }> = []
+  const prompts: Array<{ sessionID: string; text: string }> = []
+  const interrupted: string[] = []
+  const messages = new Map<string, unknown[]>()
   let idle: ((event: { sessionID: string; background: unknown[] }) => Promise<void>) | undefined
-  let messages: unknown[] = []
+  let next = 0
 
   const ctx = {
     storage: {
@@ -23,10 +26,18 @@ function harness() {
     },
     session: {
       instructions: { entry: { put: async () => {}, remove: async () => {} } },
-      synthetic: async (input: { text?: string; description?: string }) => {
-        synthetic.push(input)
+      create: async (input?: { title?: string }) => {
+        const id = `child_${++next}`
+        children.push({ id, title: input?.title })
+        return { id, title: input?.title }
       },
-      context: async () => messages,
+      prompt: async (input: { sessionID: string; text: string }) => {
+        prompts.push(input)
+      },
+      interrupt: async (input: { sessionID: string }) => {
+        interrupted.push(input.sessionID)
+      },
+      context: async (input: { sessionID: string }) => messages.get(input.sessionID) ?? [],
       hook: async (name: string, cb: never) => {
         if (name === "experimental.idle") idle = cb
       },
@@ -37,10 +48,10 @@ function harness() {
     ctx,
     store,
     commands,
-    synthetic,
-    setMessages: (value: unknown[]) => {
-      messages = value
-    },
+    children,
+    prompts,
+    interrupted,
+    setMessages: (sessionID: string, value: unknown[]) => messages.set(sessionID, value),
     idle: (event: { sessionID: string; background: unknown[] }) => {
       if (!idle) throw new Error("idle hook not registered")
       return idle(event)
@@ -55,43 +66,64 @@ describe("ralph-loop plugin", () => {
     expect([...h.commands.keys()].sort()).toEqual(["cancel-ralph", "ralph-loop"])
   })
 
-  test("inicia o loop com kickoff e continua até o marker", async () => {
-    const h = harness()
-    await plugin.setup(h.ctx)
-    const start = h.commands.get("ralph-loop")
-    await start!.execute({
-      sessionID: "ses_1",
-      prompt: { text: "fix tests --completion-promise DONE --max-iterations 2" },
-      delivery: "steer",
-    })
-    expect(h.synthetic[0]?.text).toContain("fix tests")
-    expect(h.store.get("session:ses_1")).toMatchObject({ iteration: 0, status: "active", maxIterations: 2 })
-
-    h.setMessages([{ type: "assistant", content: [{ type: "text", text: "still working" }] }])
-    await h.idle({ sessionID: "ses_1", background: [] })
-    expect(h.synthetic[1]?.text).toContain("iteration 1/2")
-    expect(h.store.get("session:ses_1")).toMatchObject({ iteration: 1, status: "active" })
-
-    h.setMessages([{ type: "assistant", content: [{ type: "text", text: "done DONE" }] }])
-    await h.idle({ sessionID: "ses_1", background: [] })
-    expect(h.store.get("session:ses_1")).toMatchObject({ status: "done" })
-    expect(h.synthetic).toHaveLength(2)
-  })
-
-  test("pausa ao atingir o limite e cancelar remove o estado", async () => {
+  test("cada iteração roda em uma sessão nova até o marker", async () => {
     const h = harness()
     await plugin.setup(h.ctx)
     await h.commands.get("ralph-loop")!.execute({
-      sessionID: "ses_2",
+      sessionID: "ses_parent",
+      prompt: { text: "fix tests --completion-promise DONE --max-iterations 3" },
+      delivery: "steer",
+    })
+
+    expect(h.children).toEqual([{ id: "child_1", title: "Ralph 1/3" }])
+    expect(h.prompts[0]?.sessionID).toBe("child_1")
+    expect(h.prompts[0]?.text).toContain("fix tests")
+    expect(h.store.get("session:ses_parent")).toMatchObject({ iteration: 0, status: "active", childID: "child_1" })
+
+    h.setMessages("child_1", [{ type: "assistant", content: [{ type: "text", text: "still working" }] }])
+    await h.idle({ sessionID: "child_1", background: [] })
+
+    expect(h.children.map((c) => c.id)).toEqual(["child_1", "child_2"])
+    expect(h.prompts[1]?.text).toContain("iteration 1/3")
+    expect(h.store.get("session:ses_parent")).toMatchObject({ iteration: 1, childID: "child_2" })
+
+    h.setMessages("child_2", [{ type: "assistant", content: [{ type: "text", text: "done DONE" }] }])
+    await h.idle({ sessionID: "child_2", background: [] })
+
+    expect(h.children).toHaveLength(2)
+    expect(h.store.get("session:ses_parent")).toMatchObject({ status: "done" })
+  })
+
+  test("max-iterations 1 para depois da primeira sessão", async () => {
+    const h = harness()
+    await plugin.setup(h.ctx)
+    await h.commands.get("ralph-loop")!.execute({
+      sessionID: "ses_one",
       prompt: { text: "task --max-iterations 1" },
       delivery: "steer",
     })
-    h.setMessages([{ type: "assistant", content: [{ type: "text", text: "working" }] }])
-    await h.idle({ sessionID: "ses_2", background: [] })
-    await h.idle({ sessionID: "ses_2", background: [] })
-    expect(h.store.get("session:ses_2")).toMatchObject({ status: "paused" })
+    h.setMessages("child_1", [{ type: "assistant", content: [{ type: "text", text: "working" }] }])
+    await h.idle({ sessionID: "child_1", background: [] })
 
-    await h.commands.get("cancel-ralph")!.execute({ sessionID: "ses_2", prompt: { text: "" }, delivery: "steer" })
-    expect(h.store.has("session:ses_2")).toBe(false)
+    expect(h.children).toHaveLength(1)
+    expect(h.store.get("session:ses_one")).toMatchObject({ status: "paused" })
+  })
+
+  test("cancelar interrompe a sessão filha e remove o estado", async () => {
+    const h = harness()
+    await plugin.setup(h.ctx)
+    await h.commands.get("ralph-loop")!.execute({
+      sessionID: "ses_cancel",
+      prompt: { text: "task" },
+      delivery: "steer",
+    })
+    await h.commands.get("cancel-ralph")!.execute({
+      sessionID: "ses_cancel",
+      prompt: { text: "" },
+      delivery: "steer",
+    })
+
+    expect(h.interrupted).toEqual(["child_1"])
+    expect(h.store.has("session:ses_cancel")).toBe(false)
   })
 })

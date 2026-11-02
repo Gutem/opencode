@@ -1,12 +1,12 @@
 # Ralph Loop for OpenCode
 
-A small official plugin that reproduces the Ralph Wiggum technique inside an
-OpenCode session: the same prompt is fed back after each turn until the
-assistant emits a completion marker or the iteration budget is exhausted.
+A small plugin that reproduces the Ralph Wiggum technique in OpenCode: the same
+task runs again in a **fresh Session** after each turn until the assistant
+emits a completion marker or the iteration budget is exhausted.
 
 It is built on the `experimental.idle` Session hook, the same mechanism used by
-OpenCode's built-in `/goal`: input admitted from that hook runs in the same
-execution instead of letting the Session go idle.
+OpenCode's built-in `/goal`. The parent Session keeps the loop state; each
+iteration is a new child Session with a clean context.
 
 ## Install
 
@@ -47,16 +47,16 @@ Cancel with:
 
 ## Behavior
 
-- The task is persisted in plugin storage, keyed by Session.
-- The task also becomes a session instruction entry, so compaction does not
-  lose it.
-- Before each continuation the plugin reads the assistant messages and checks
-  the completion marker.
-- If the Session has a running shell or subagent, the hook returns; that work
-  wakes the Session and the hook runs again.
+- The parent Session stores the loop state; each iteration creates a new child
+  Session and prompts it with the task and the iteration number.
+- The task is also a session instruction entry on the parent and on each child,
+  so compaction does not lose it.
+- Before each continuation the plugin reads the child's assistant messages and
+  checks the completion marker.
+- Child Sessions are kept after the loop for audit; they are normal Sessions and
+  can be inspected or removed by the user.
 - A server restart pauses an active loop instead of resuming silently.
-- The loop never runs commands by itself: it only injects a synthetic user
-  message with the next step.
+- The loop never runs commands by itself: it only prompts child Sessions.
 
 ## Safety
 

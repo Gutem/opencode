@@ -83,7 +83,7 @@ export function decide(input: { readonly state: State; readonly assistantText: s
       reason: "completion marker seen",
     }
   }
-  if (state.iteration >= state.maxIterations) {
+  if (state.iteration + 1 >= state.maxIterations) {
     return {
       kind: "paused",
       state: { ...state, status: "paused", reason: `Reached the limit of ${state.maxIterations} iterations` },
